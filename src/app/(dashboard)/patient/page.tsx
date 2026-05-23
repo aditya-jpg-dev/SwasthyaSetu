@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
 import { createClient } from '@/lib/supabase/client'
@@ -10,6 +10,24 @@ import type { Profile, Appointment } from '@/types'
 interface ChatMessage {
   role: 'user' | 'assistant'
   content: string
+}
+
+type JoinCountdown = {
+  appointmentId: string
+  meetLink: string
+  doctorName: string
+  secondsLeft: number
+}
+
+type AppointmentRealtimePayload = {
+  new: {
+    id: string
+    patient_id: string
+    doctor_id: string | null
+    status: Appointment['status']
+    meet_link: string | null
+    is_immediate: boolean
+  }
 }
 
 export default function PatientDashboardPage() {
@@ -25,7 +43,73 @@ export default function PatientDashboardPage() {
   const [chatInput, setChatInput] = useState('')
   const [chatLoading, setChatLoading] = useState(false)
   const [showBookCta, setShowBookCta] = useState(false)
+  const [joinCountdown, setJoinCountdown] = useState<JoinCountdown | null>(null)
+  const [expiredInstantNotice, setExpiredInstantNotice] = useState<string | null>(null)
   const chatBottomRef = useRef<HTMLDivElement>(null)
+  const patientIdRef = useRef<string | null>(null)
+  const autoJoinHandledRef = useRef<Set<string>>(new Set())
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const noticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  const startJoinCountdown = useCallback((appointment: Appointment) => {
+    if (!appointment.meet_link) return
+    if (autoJoinHandledRef.current.has(appointment.id)) return
+    autoJoinHandledRef.current.add(appointment.id)
+    setJoinCountdown({
+      appointmentId: appointment.id,
+      meetLink: appointment.meet_link,
+      doctorName: appointment.doctor?.full_name ?? 'Doctor',
+      secondsLeft: 3,
+    })
+  }, [])
+
+  const refreshAppointments = useCallback(async (patientId: string) => {
+    const supabase = createClient()
+    const nowIso = new Date().toISOString()
+
+    const { data: expiredRows } = await supabase
+      .from('appointments')
+      .update({ status: 'cancelled' })
+      .eq('patient_id', patientId)
+      .eq('is_immediate', true)
+      .eq('status', 'pending')
+      .is('doctor_id', null)
+      .lte('scheduled_at', nowIso)
+      .select('id')
+
+    if ((expiredRows?.length ?? 0) > 0) {
+      setExpiredInstantNotice('No doctor was available in 10 minutes. Please schedule a regular appointment.')
+      if (noticeTimerRef.current) clearTimeout(noticeTimerRef.current)
+      noticeTimerRef.current = setTimeout(() => {
+        setExpiredInstantNotice(null)
+      }, 8000)
+    }
+
+    const { data: apptData } = await supabase
+      .from('appointments')
+      .select('*, doctor:profiles!appointments_doctor_id_fkey(full_name, phone)')
+      .eq('patient_id', patientId)
+      .in('status', ['pending', 'confirmed'])
+      .order('scheduled_at', { ascending: true })
+      .limit(5)
+
+    const list = (apptData ?? []) as Appointment[]
+    setAppointments(list)
+
+    for (const appointment of list) {
+      const createdAtMs = appointment.created_at ? new Date(appointment.created_at).getTime() : 0
+      const isRecentImmediate = Date.now() - createdAtMs < 30 * 60 * 1000
+      if (
+        appointment.is_immediate &&
+        appointment.status === 'confirmed' &&
+        appointment.meet_link &&
+        isRecentImmediate
+      ) {
+        startJoinCountdown(appointment)
+        break
+      }
+    }
+  }, [startJoinCountdown])
 
   useEffect(() => {
     let isMounted = true
@@ -35,6 +119,7 @@ export default function PatientDashboardPage() {
         const { data: userData } = await supabase.auth.getUser()
         const user = userData.user
         if (!user) { router.push('/login'); return }
+        patientIdRef.current = user.id
 
         const metaRole = user.user_metadata?.role
         if (metaRole && metaRole !== 'patient') { router.push(`/${metaRole}`); return }
@@ -49,35 +134,87 @@ export default function PatientDashboardPage() {
           phone: null, lang_pref: 'en', avatar_url: null, created_at: '',
         }
 
-        const { data: apptData } = await supabase
-          .from('appointments')
-          .select('*, doctor:profiles!appointments_doctor_id_fkey(full_name, phone)')
-          .eq('patient_id', user.id)
-          .in('status', ['pending', 'confirmed'])
-          .order('scheduled_at', { ascending: true })
-          .limit(5)
-
         if (!isMounted) return
         setProfile(resolvedProfile as Profile)
-        setAppointments(apptData ?? [])
+        await refreshAppointments(user.id)
       } catch (e) {
         console.error('Dashboard load error:', e)
       } finally {
         if (isMounted) setLoading(false)
       }
     }
-    loadDashboard()
-    return () => { isMounted = false }
-  }, [router])
+    loadDashboard().then(() => {
+      if (!isMounted) return
+      const patientId = patientIdRef.current
+      if (!patientId) return
+      pollRef.current = setInterval(() => {
+        void refreshAppointments(patientId)
+      }, 10000)
+    })
+    return () => {
+      isMounted = false
+      if (pollRef.current) clearInterval(pollRef.current)
+    }
+  }, [router, refreshAppointments])
 
   useEffect(() => {
     chatBottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages, chatLoading])
 
+  useEffect(() => {
+    return () => {
+      if (noticeTimerRef.current) clearTimeout(noticeTimerRef.current)
+    }
+  }, [])
+
+  useEffect(() => {
+    const patientId = profile?.id
+    if (!patientId) return
+
+    const supabase = createClient()
+    const channel = supabase
+      .channel(`patient-immediate-${patientId}`)
+      .on(
+        'postgres_changes',
+        { event: 'UPDATE', schema: 'public', table: 'appointments', filter: `patient_id=eq.${patientId}` },
+        (payload) => {
+          const change = payload as unknown as AppointmentRealtimePayload
+          if (!change.new.is_immediate) return
+          if (change.new.status === 'confirmed' && change.new.meet_link) {
+            void refreshAppointments(patientId)
+          }
+        }
+      )
+      .subscribe()
+
+    return () => {
+      void supabase.removeChannel(channel)
+    }
+  }, [profile?.id, refreshAppointments])
+
+  useEffect(() => {
+    if (!joinCountdown) return
+
+    const timer = setTimeout(() => {
+      setJoinCountdown((prev) => {
+        if (!prev) return prev
+        if (prev.secondsLeft <= 1) {
+          window.open(prev.meetLink, '_blank', 'noopener,noreferrer')
+          return null
+        }
+        return { ...prev, secondsLeft: prev.secondsLeft - 1 }
+      })
+    }, 1000)
+
+    return () => clearTimeout(timer)
+  }, [joinCountdown])
+
   const handleLogout = async () => {
     const supabase = createClient()
-    await supabase.auth.signOut()
-    router.push('/')
+    await fetch('/auth/signout', { method: 'POST' })
+    await supabase.auth.signOut({ scope: 'local' })
+    router.replace('/login')
+    router.refresh()
   }
 
   const sendChatMessage = async () => {
@@ -217,6 +354,12 @@ export default function PatientDashboardPage() {
             <Link href="/book-appointment" className="text-xs font-medium text-emerald-600 hover:underline">+ New</Link>
           </div>
 
+          {expiredInstantNotice && (
+            <div className="mb-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+              {expiredInstantNotice}
+            </div>
+          )}
+
           {appointments.length === 0 ? (
             <div className="rounded-2xl bg-white p-8 text-center shadow-sm">
               <div className="mx-auto mb-3 flex h-14 w-14 items-center justify-center rounded-full bg-slate-50 text-2xl">📅</div>
@@ -231,13 +374,19 @@ export default function PatientDashboardPage() {
             </div>
           ) : (
             <div className="space-y-3">
-              {appointments.map((appt) => (
+              {appointments.map((appt) => {
+                const isWaitingInstant = appt.is_immediate && appt.status === 'pending'
+                const doctorLabel = isWaitingInstant
+                  ? 'Instant Call'
+                  : `Dr. ${appt.doctor?.full_name ?? 'Doctor'}`
+
+                return (
                 <article key={appt.id} className="rounded-2xl bg-white p-4 shadow-sm">
                   <div className="flex items-start justify-between gap-4">
                     <div className="flex-1">
                       <div className="flex flex-wrap items-center gap-2">
                         <h3 className="font-semibold text-slate-800">
-                          Dr. {appt.doctor?.full_name ?? 'Doctor'}
+                          {doctorLabel}
                         </h3>
                         <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${getStatusClasses(appt.status)}`}>
                           {appt.status}
@@ -265,7 +414,8 @@ export default function PatientDashboardPage() {
                     )}
                   </div>
                 </article>
-              ))}
+                )
+              })}
             </div>
           )}
         </section>
@@ -285,6 +435,20 @@ export default function PatientDashboardPage() {
           <span className="text-slate-400">→</span>
         </Link>
       </main>
+
+      {joinCountdown && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4">
+          <div className="w-full max-w-md rounded-3xl bg-white p-8 text-center shadow-xl">
+            <div className="mx-auto mb-3 flex h-16 w-16 items-center justify-center rounded-full bg-emerald-100 text-3xl">✅</div>
+            <h2 className="text-xl font-bold text-slate-800">Doctor Found</h2>
+            <p className="mt-2 text-sm text-slate-500">
+              Dr. <strong>{joinCountdown.doctorName}</strong> accepted your request.
+            </p>
+            <p className="mt-3 text-4xl font-extrabold text-emerald-600">{joinCountdown.secondsLeft}</p>
+            <p className="mt-2 text-xs text-slate-400">Starting your call automatically...</p>
+          </div>
+        </div>
+      )}
 
       {/* ── AI CHAT SIDEBAR ── */}
       {/* Backdrop */}

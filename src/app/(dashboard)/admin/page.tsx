@@ -127,8 +127,10 @@ export default function AdminDashboardPage() {
 
   const handleLogout = async () => {
     const supabase = createClient()
-    await supabase.auth.signOut()
-    router.push('/')
+    await fetch('/auth/signout', { method: 'POST' })
+    await supabase.auth.signOut({ scope: 'local' })
+    router.replace('/login')
+    router.refresh()
   }
 
   const getStatusClasses = (status: string) => {

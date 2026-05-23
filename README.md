@@ -1,36 +1,48 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# SwasthyaSetu
 
-## Getting Started
+Telehealth platform built with Next.js 16 and Supabase.
 
-First, run the development server:
+## Local Development
+
+1. Install dependencies:
+
+```bash
+npm install
+```
+
+2. Create `.env.local` from `.env.example` and fill values.
+
+3. Run development server:
 
 ```bash
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+## Required Environment Variables
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+Set these variables in local and in Railway service variables:
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+- `NEXT_PUBLIC_SUPABASE_URL`
+- `NEXT_PUBLIC_SUPABASE_ANON_KEY`
+- `SUPABASE_SERVICE_ROLE_KEY`
+- `GROQ_API_KEY`
 
-## Learn More
+Important:
+- `NEXT_PUBLIC_*` variables are embedded during build, so they must exist in Railway before deploy starts.
 
-To learn more about Next.js, take a look at the following resources:
+## Railway Deploy
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+This repo is configured for Railway Node deploy:
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+- `next.config.ts` uses `output: "standalone"`
+- `npm run build` creates standalone server output
+- `npm start` runs `node .next/standalone/server.js`
 
-## Deploy on Vercel
+Deploy steps:
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+1. Push this repo/branch to GitHub.
+2. In Railway, create service from GitHub repo.
+3. Add all required environment variables.
+4. Trigger deploy.
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Railway will provide `PORT` automatically.

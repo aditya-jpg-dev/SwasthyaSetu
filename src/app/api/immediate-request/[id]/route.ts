@@ -30,8 +30,44 @@ export async function POST(
     const { action } = await req.json() as { action: 'accept' | 'reject' }
     const supabase = await createAdminClient()
 
+    const { data: profile } = await supabase
+      .from('profiles')
+      .select('role')
+      .eq('id', user.id)
+      .single()
+
+    const effectiveRole = profile?.role ?? user.user_metadata?.role
+    if (effectiveRole !== 'doctor') {
+      return NextResponse.json({ error: 'Only doctors can take this action' }, { status: 403 })
+    }
+
+    const { data: doctorStatus } = await supabase
+      .from('doctors')
+      .select('is_active')
+      .eq('id', user.id)
+      .single()
+
+    if (!doctorStatus?.is_active) {
+      return NextResponse.json({ error: 'Activate your doctor status to accept instant requests' }, { status: 400 })
+    }
+
     if (action === 'accept') {
-      const meetLink = jitsiLink(id)
+      const nowIso = new Date().toISOString()
+
+      const { data: pendingAppointment } = await supabase
+        .from('appointments')
+        .select('call_type')
+        .eq('id', id)
+        .is('doctor_id', null)
+        .eq('status', 'pending')
+        .gt('scheduled_at', nowIso)
+        .single()
+
+      if (!pendingAppointment) {
+        return NextResponse.json({ error: 'Already accepted by another doctor' }, { status: 409 })
+      }
+
+      const meetLink = pendingAppointment.call_type === 'video' ? jitsiLink(id) : null
 
       // Atomic: only succeeds if still unclaimed
       const { data, error } = await supabase
@@ -40,6 +76,7 @@ export async function POST(
         .eq('id', id)
         .is('doctor_id', null)
         .eq('status', 'pending')
+        .gt('scheduled_at', nowIso)
         .select()
         .single()
 
@@ -55,7 +92,7 @@ export async function POST(
         .from('appointment_rejections')
         .insert({ appointment_id: id, doctor_id: user.id })
 
-      if (error && error.code !== '23505') {
+      if (error && error.code !== '23505' && error.code !== '42P01') {
         return NextResponse.json({ error: error.message }, { status: 500 })
       }
 

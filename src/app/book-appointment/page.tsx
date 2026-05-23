@@ -30,6 +30,8 @@ const WALLETS = [
   { id: 'mobikwik', label: 'MobiKwik', icon: '🔷' },
 ]
 
+const INSTANT_CONSULTATION_FEE = 150
+
 export default function BookAppointmentPage() {
   const { t } = useLang()
   const router = useRouter()
@@ -110,7 +112,7 @@ export default function BookAppointmentPage() {
     if (mode === 'scheduled' && !scheduledAt) { setError('Please select a date and time'); return }
     if (callType === 'audio' && !phone.trim()) { setError('Please enter your phone number for the audio call'); return }
     setError('')
-    // Instant video call or scheduled: no payment needed if free
+    // Skip payment only if consultation is truly free
     if (fee === 0) { bookAppointment(); return }
     setShowPayment(true)
   }
@@ -168,7 +170,7 @@ export default function BookAppointmentPage() {
   }
 
   const minDateTime = new Date().toISOString().slice(0, 16)
-  const fee = selectedDoctor?.consultation_fee ?? 0
+  const fee = mode === 'instant' ? INSTANT_CONSULTATION_FEE : (selectedDoctor?.consultation_fee ?? 0)
 
   if (loading) {
     return (
@@ -188,7 +190,7 @@ export default function BookAppointmentPage() {
           </h1>
           {mode === 'instant' ? (
             <p className="mt-3 text-slate-500">
-              Your request is now live. An available doctor will accept it within minutes. You'll be notified on <strong>{phone}</strong>.
+              Your request is now live. An available doctor will accept it within minutes. You will be notified on <strong>{phone}</strong>.
             </p>
           ) : meetLink ? (
             <div className="mt-4">
@@ -251,7 +253,7 @@ export default function BookAppointmentPage() {
           >
             <div className="text-xl mb-1">⚡</div>
             <p className="font-semibold text-slate-800">Call Now</p>
-            <p className="text-xs text-slate-500">Connect within 10 minutes · Free</p>
+            <p className="text-xs text-slate-500">Connect within 10 minutes · ₹150</p>
           </button>
         </div>
 
