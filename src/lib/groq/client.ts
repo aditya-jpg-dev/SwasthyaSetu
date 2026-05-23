@@ -1,8 +1,15 @@
 import Groq from 'groq-sdk'
 
-export const groq = new Groq({
-  apiKey: process.env.GROQ_API_KEY,
-})
+let _groq: Groq | null = null
+
+export function getGroqClient(): Groq {
+  if (!_groq) {
+    _groq = new Groq({
+      apiKey: process.env.GROQ_API_KEY,
+    })
+  }
+  return _groq
+}
 
 export const TRIAGE_SYSTEM_PROMPT = `You are a medical triage assistant for a rural telehealth platform in India.
 Your role is to:
@@ -34,7 +41,7 @@ export async function chatWithTriage(
       : TRIAGE_SYSTEM_PROMPT,
   }
 
-  const completion = await groq.chat.completions.create({
+  const completion = await getGroqClient().chat.completions.create({
     model: 'llama-3.3-70b-versatile',
     messages: [systemMessage, ...messages],
     temperature: 0.3,
