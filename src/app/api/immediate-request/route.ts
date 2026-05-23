@@ -23,11 +23,22 @@ export async function POST(req: NextRequest) {
     const { callType, symptoms, phone, savePhone } = await req.json()
     const supabase = await createAdminClient()
 
+    const { data: profile } = await supabase
+      .from('profiles')
+      .select('role')
+      .eq('id', user.id)
+      .single()
+
+    const effectiveRole = profile?.role ?? user.user_metadata?.role
+    if (effectiveRole !== 'patient') {
+      return NextResponse.json({ error: 'Only patients can create instant requests' }, { status: 403 })
+    }
+
     if (savePhone && phone) {
       await supabase.from('profiles').update({ phone }).eq('id', user.id)
     }
 
-    const scheduledAt = new Date(Date.now() + 5 * 60 * 1000).toISOString()
+    const scheduledAt = new Date(Date.now() + 10 * 60 * 1000).toISOString()
 
     const { data: appt, error } = await supabase
       .from('appointments')
@@ -62,10 +73,44 @@ export async function GET(req: NextRequest) {
 
     const supabase = await createAdminClient()
 
-    const { data: rejections } = await supabase
+    const { data: profile } = await supabase
+      .from('profiles')
+      .select('role')
+      .eq('id', user.id)
+      .single()
+
+    const effectiveRole = profile?.role ?? user.user_metadata?.role
+    if (effectiveRole !== 'doctor') {
+      return NextResponse.json({ error: 'Only doctors can fetch instant requests' }, { status: 403 })
+    }
+
+    const { data: doctorStatus } = await supabase
+      .from('doctors')
+      .select('is_active')
+      .eq('id', user.id)
+      .single()
+
+    if (!doctorStatus?.is_active) {
+      return NextResponse.json({ requests: [] })
+    }
+
+    const nowIso = new Date().toISOString()
+    await supabase
+      .from('appointments')
+      .update({ status: 'cancelled' })
+      .eq('is_immediate', true)
+      .eq('status', 'pending')
+      .is('doctor_id', null)
+      .lte('scheduled_at', nowIso)
+
+    const { data: rejections, error: rejectionsError } = await supabase
       .from('appointment_rejections')
       .select('appointment_id')
       .eq('doctor_id', user.id)
+
+    if (rejectionsError && rejectionsError.code !== '42P01') {
+      return NextResponse.json({ error: rejectionsError.message }, { status: 500 })
+    }
 
     const rejectedIds = (rejections ?? []).map((r: { appointment_id: string }) => r.appointment_id)
 
@@ -75,6 +120,7 @@ export async function GET(req: NextRequest) {
       .eq('is_immediate', true)
       .eq('status', 'pending')
       .is('doctor_id', null)
+      .gt('scheduled_at', nowIso)
       .order('created_at', { ascending: true })
 
     if (error) return NextResponse.json({ error: error.message }, { status: 500 })

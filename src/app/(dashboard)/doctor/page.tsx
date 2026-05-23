@@ -12,8 +12,30 @@ type ImmediateRequest = {
   scheduled_at: string
   call_type: 'video' | 'audio'
   symptoms: string | null
-  patient: { full_name: string | null; phone: string | null } | null
+  patient: PatientIdentity
 }
+
+type AppointmentRealtimePayload = {
+  new: {
+    id: string
+    doctor_id: string | null
+    status: Appointment['status']
+    meet_link: string | null
+    is_immediate: boolean
+  }
+}
+
+type JoinCountdown = {
+  appointmentId: string
+  meetLink: string
+  patientName: string
+  secondsLeft: number
+}
+
+type PatientIdentity = {
+  full_name: string | null
+  phone: string | null
+} | null
 
 export default function DoctorDashboardPage() {
   const { t } = useLang()
@@ -26,8 +48,51 @@ export default function DoctorDashboardPage() {
   const [togglingStatus, setTogglingStatus] = useState(false)
   const [acceptingId, setAcceptingId] = useState<string | null>(null)
   const [rejectingId, setRejectingId] = useState<string | null>(null)
+  const [joinCountdown, setJoinCountdown] = useState<JoinCountdown | null>(null)
   const sessionRef = useRef<string | null>(null)
+  const joinedAppointmentsRef = useRef<Set<string>>(new Set())
+  const immediateRequestsRef = useRef<ImmediateRequest[]>([])
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+
+  const getPatientLabel = useCallback((patient: PatientIdentity) => {
+    const name = patient?.full_name?.trim()
+    if (name) return name
+    const phone = patient?.phone?.trim()
+    if (phone) return phone
+    return 'Patient'
+  }, [])
+
+  const getPatientInitial = useCallback((patient: PatientIdentity) => {
+    return getPatientLabel(patient).charAt(0).toUpperCase()
+  }, [getPatientLabel])
+
+  const refreshAppointments = useCallback(async () => {
+    try {
+      const res = await fetch('/api/appointments', {
+        headers: sessionRef.current ? { Authorization: `Bearer ${sessionRef.current}` } : {},
+      })
+      if (!res.ok) return
+
+      const data = await res.json()
+      const apptData = (data.appointments ?? []) as Appointment[]
+      const nextAppointments = apptData
+        .filter((appt) => appt.status === 'pending' || appt.status === 'confirmed')
+        .sort((a, b) => new Date(a.scheduled_at).getTime() - new Date(b.scheduled_at).getTime())
+        .slice(0, 10)
+      setAppointments(nextAppointments)
+    } catch {}
+  }, [])
+
+  const beginJoinCountdown = useCallback((appointmentId: string, meetLink: string, patientName: string) => {
+    if (joinedAppointmentsRef.current.has(appointmentId)) return
+    joinedAppointmentsRef.current.add(appointmentId)
+    setJoinCountdown({
+      appointmentId,
+      meetLink,
+      patientName,
+      secondsLeft: 3,
+    })
+  }, [])
 
   const fetchImmediateRequests = useCallback(async () => {
     try {
@@ -40,6 +105,27 @@ export default function DoctorDashboardPage() {
       }
     } catch {}
   }, [])
+
+  useEffect(() => {
+    immediateRequestsRef.current = immediateRequests
+  }, [immediateRequests])
+
+  useEffect(() => {
+    if (!joinCountdown) return
+
+    const timer = setTimeout(() => {
+      setJoinCountdown((prev) => {
+        if (!prev) return prev
+        if (prev.secondsLeft <= 1) {
+          window.open(prev.meetLink, '_blank', 'noopener,noreferrer')
+          return null
+        }
+        return { ...prev, secondsLeft: prev.secondsLeft - 1 }
+      })
+    }, 1000)
+
+    return () => clearTimeout(timer)
+  }, [joinCountdown])
 
   useEffect(() => {
     let isMounted = true
@@ -70,18 +156,10 @@ export default function DoctorDashboardPage() {
         const { data: doctorData } = await supabase
           .from('doctors').select('is_active').eq('id', user.id).single()
 
-        const { data: apptData } = await supabase
-          .from('appointments')
-          .select('*, patient:profiles!appointments_patient_id_fkey(full_name, phone)')
-          .eq('doctor_id', user.id)
-          .in('status', ['pending', 'confirmed'])
-          .order('scheduled_at', { ascending: true })
-          .limit(10)
-
         if (!isMounted) return
         setProfile(resolvedProfile as Profile)
         setIsActive(doctorData?.is_active ?? false)
-        setAppointments(apptData ?? [])
+        await refreshAppointments()
       } catch (e) {
         console.error('Doctor dashboard error:', e)
       } finally {
@@ -99,7 +177,55 @@ export default function DoctorDashboardPage() {
       isMounted = false
       if (pollRef.current) clearInterval(pollRef.current)
     }
-  }, [router, fetchImmediateRequests])
+  }, [router, fetchImmediateRequests, refreshAppointments])
+
+  useEffect(() => {
+    if (!profile?.id || !isActive) return
+
+    const supabase = createClient()
+    const channel = supabase
+      .channel(`immediate-requests-doctor-${profile.id}`)
+      .on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'appointments', filter: 'is_immediate=eq.true' },
+        (payload) => {
+          const change = payload as unknown as AppointmentRealtimePayload
+          if (change.new.status === 'pending' && !change.new.doctor_id) {
+            fetchImmediateRequests()
+          }
+        }
+      )
+      .on(
+        'postgres_changes',
+        { event: 'UPDATE', schema: 'public', table: 'appointments', filter: 'is_immediate=eq.true' },
+        (payload) => {
+          const change = payload as unknown as AppointmentRealtimePayload
+          const updatedId = change.new.id
+          if (!updatedId) return
+
+          setImmediateRequests((prev) => prev.filter((req) => req.id !== updatedId))
+
+          if (
+            change.new.doctor_id === profile.id &&
+            change.new.status === 'confirmed' &&
+            change.new.meet_link
+          ) {
+            const assignedRequest = immediateRequestsRef.current.find((req) => req.id === updatedId)
+            beginJoinCountdown(
+              updatedId,
+              change.new.meet_link,
+              getPatientLabel(assignedRequest?.patient ?? null)
+            )
+            void refreshAppointments()
+          }
+        }
+      )
+      .subscribe()
+
+    return () => {
+      void supabase.removeChannel(channel)
+    }
+  }, [profile?.id, isActive, fetchImmediateRequests, beginJoinCountdown, refreshAppointments, getPatientLabel])
 
   const handleToggleStatus = async () => {
     if (!profile) return
@@ -126,23 +252,16 @@ export default function DoctorDashboardPage() {
       })
       if (res.ok) {
         const data = await res.json()
+        const acceptedRequest = immediateRequests.find((req) => req.id === requestId)
         setImmediateRequests(prev => prev.filter(r => r.id !== requestId))
         if (data.appointment?.meet_link) {
-          window.open(data.appointment.meet_link, '_blank')
+          beginJoinCountdown(
+            requestId,
+            data.appointment.meet_link,
+            getPatientLabel(acceptedRequest?.patient ?? null)
+          )
         }
-        // Refresh appointments list
-        const supabase = createClient()
-        const { data: { user } } = await supabase.auth.getUser()
-        if (user) {
-          const { data: apptData } = await supabase
-            .from('appointments')
-            .select('*, patient:profiles!appointments_patient_id_fkey(full_name, phone)')
-            .eq('doctor_id', user.id)
-            .in('status', ['pending', 'confirmed'])
-            .order('scheduled_at', { ascending: true })
-            .limit(10)
-          setAppointments(apptData ?? [])
-        }
+        await refreshAppointments()
       } else {
         alert('This request was already accepted by another doctor.')
         fetchImmediateRequests()
@@ -169,10 +288,22 @@ export default function DoctorDashboardPage() {
     }
   }
 
+  const handleAudioCall = (phone: string | null) => {
+    if (!phone) {
+      alert('Patient phone number is not available.')
+      return
+    }
+    window.open(`tel:${phone}`, '_self')
+  }
+
+  const popupRequest = isActive && immediateRequests.length > 0 ? immediateRequests[0] : null
+
   const handleLogout = async () => {
     const supabase = createClient()
-    await supabase.auth.signOut()
-    router.push('/')
+    await fetch('/auth/signout', { method: 'POST' })
+    await supabase.auth.signOut({ scope: 'local' })
+    router.replace('/login')
+    router.refresh()
   }
 
   const today = new Date()
@@ -268,7 +399,7 @@ export default function DoctorDashboardPage() {
 
             {immediateRequests.length === 0 ? (
               <div className="rounded-2xl border border-dashed border-slate-200 bg-white p-6 text-center">
-                <p className="text-sm text-slate-400">No instant requests right now. You'll see them here as they come in.</p>
+                <p className="text-sm text-slate-400">No instant requests right now. You will see them here as they come in.</p>
               </div>
             ) : (
               <div className="space-y-3">
@@ -278,10 +409,10 @@ export default function DoctorDashboardPage() {
                       <div className="flex-1">
                         <div className="flex items-center gap-2">
                           <div className="flex h-8 w-8 items-center justify-center rounded-full bg-orange-200 text-sm font-bold text-orange-800">
-                            {req.patient?.full_name?.charAt(0) ?? 'P'}
+                            {getPatientInitial(req.patient)}
                           </div>
                           <div>
-                            <p className="font-semibold text-slate-800">{req.patient?.full_name ?? 'Patient'}</p>
+                            <p className="font-semibold text-slate-800">{getPatientLabel(req.patient)}</p>
                             {req.patient?.phone && (
                               <p className="text-xs text-slate-500">📞 {req.patient.phone}</p>
                             )}
@@ -344,11 +475,11 @@ export default function DoctorDashboardPage() {
                 <article key={appt.id} className="rounded-2xl bg-white p-4 shadow-sm">
                   <div className="flex items-start gap-4">
                     <div className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full bg-emerald-100 text-sm font-bold text-emerald-700">
-                      {appt.patient?.full_name?.charAt(0) ?? 'P'}
+                      {getPatientInitial(appt.patient ?? null)}
                     </div>
                     <div className="flex-1">
                       <div className="flex flex-wrap items-center gap-2">
-                        <h3 className="font-semibold text-slate-800">{appt.patient?.full_name ?? 'Patient'}</h3>
+                        <h3 className="font-semibold text-slate-800">{getPatientLabel(appt.patient ?? null)}</h3>
                         <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${getStatusClasses(appt.status)}`}>
                           {appt.status}
                         </span>
@@ -374,7 +505,7 @@ export default function DoctorDashboardPage() {
                   </div>
 
                   <div className="mt-3 flex flex-wrap gap-2">
-                    {appt.status === 'confirmed' && appt.meet_link && (
+                    {appt.status === 'confirmed' && appt.call_type === 'video' && appt.meet_link && (
                       <a
                         href={appt.meet_link}
                         target="_blank"
@@ -383,6 +514,16 @@ export default function DoctorDashboardPage() {
                       >
                         📹 Join Call
                       </a>
+                    )}
+                    {appt.status === 'confirmed' && appt.call_type === 'audio' && (
+                      <button
+                        type="button"
+                        onClick={() => handleAudioCall(appt.patient?.phone ?? null)}
+                        disabled={!appt.patient?.phone}
+                        className="rounded-xl bg-blue-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-slate-300"
+                      >
+                        {appt.patient?.phone ? `📞 Call ${appt.patient.phone}` : '📞 Patient number unavailable'}
+                      </button>
                     )}
                     <Link
                       href={`/prescription/${appt.id}`}
@@ -397,6 +538,52 @@ export default function DoctorDashboardPage() {
           )}
         </section>
       </main>
+
+      {popupRequest && (
+        <div className="fixed bottom-5 right-5 z-40 w-[92vw] max-w-sm rounded-2xl border border-orange-300 bg-white p-4 shadow-2xl">
+          <p className="text-xs font-semibold uppercase tracking-wide text-orange-600">Immediate Patient Request</p>
+          <p className="mt-1 text-sm font-bold text-slate-800">{getPatientLabel(popupRequest.patient)}</p>
+          <p className="text-xs text-slate-500">
+            {popupRequest.call_type === 'video' ? '📹 Video Call' : '📞 Audio Call'}
+            {popupRequest.patient?.phone ? ` · ${popupRequest.patient.phone}` : ''}
+          </p>
+          {popupRequest.symptoms && (
+            <p className="mt-2 rounded-lg bg-orange-50 px-2.5 py-2 text-xs text-slate-600">{popupRequest.symptoms}</p>
+          )}
+          <div className="mt-3 grid grid-cols-2 gap-2">
+            <button
+              type="button"
+              onClick={() => handleAccept(popupRequest.id)}
+              disabled={acceptingId === popupRequest.id}
+              className="rounded-lg bg-emerald-600 px-3 py-2 text-xs font-bold text-white hover:bg-emerald-700 disabled:opacity-50"
+            >
+              {acceptingId === popupRequest.id ? 'Accepting...' : 'Accept'}
+            </button>
+            <button
+              type="button"
+              onClick={() => handleReject(popupRequest.id)}
+              disabled={rejectingId === popupRequest.id}
+              className="rounded-lg border border-slate-200 px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+            >
+              {rejectingId === popupRequest.id ? 'Skipping...' : 'Skip'}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {joinCountdown && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4">
+          <div className="w-full max-w-md rounded-3xl bg-white p-8 text-center shadow-xl">
+            <div className="mx-auto mb-3 flex h-16 w-16 items-center justify-center rounded-full bg-emerald-100 text-3xl">📹</div>
+            <h2 className="text-xl font-bold text-slate-800">Patient Connected</h2>
+            <p className="mt-2 text-sm text-slate-500">
+              Starting video consult with <strong>{joinCountdown.patientName}</strong> in
+            </p>
+            <p className="mt-3 text-4xl font-extrabold text-emerald-600">{joinCountdown.secondsLeft}</p>
+            <p className="mt-2 text-xs text-slate-400">Meeting link will open automatically.</p>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
