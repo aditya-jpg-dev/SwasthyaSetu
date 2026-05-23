@@ -34,15 +34,15 @@ Important:
 
 This repo is configured for Railway Node deploy:
 
-- `next.config.ts` uses `output: "standalone"`
-- `npm run build` creates standalone server output
-- `npm start` runs `node .next/standalone/server.js`
+- `npm run build` first validates required env vars, then runs `next build`
+- `npm start` runs `next start -H 0.0.0.0 -p ${PORT:-3000}`
 
 Deploy steps:
 
 1. Push this repo/branch to GitHub.
 2. In Railway, create service from GitHub repo.
 3. Add all required environment variables.
-4. Trigger deploy.
+4. Ensure Railway Start Command is `npm start` (or leave default if it already uses it).
+5. Trigger deploy.
 
 Railway will provide `PORT` automatically.

@@ -1,6 +1,6 @@
 'use client'
 
-import { createContext, useContext, useState, useEffect, ReactNode } from 'react'
+import { createContext, useContext, useState, ReactNode } from 'react'
 import { Lang, t as translate } from './index'
 
 interface LangContextType {
@@ -15,15 +15,16 @@ const LangContext = createContext<LangContextType>({
   t: (key) => key,
 })
 
-export function LangProvider({ children }: { children: ReactNode }) {
-  const [lang, setLangState] = useState<Lang>('en')
+function isLang(value: string | null): value is Lang {
+  return value === 'en' || value === 'hi' || value === 'mr'
+}
 
-  useEffect(() => {
-    const stored = localStorage.getItem('lang') as Lang
-    if (stored && ['en', 'hi', 'mr'].includes(stored)) {
-      setLangState(stored)
-    }
-  }, [])
+export function LangProvider({ children }: { children: ReactNode }) {
+  const [lang, setLangState] = useState<Lang>(() => {
+    if (typeof window === 'undefined') return 'en'
+    const stored = localStorage.getItem('lang')
+    return isLang(stored) ? stored : 'en'
+  })
 
   const setLang = (newLang: Lang) => {
     setLangState(newLang)

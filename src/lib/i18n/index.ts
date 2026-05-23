@@ -4,15 +4,22 @@ import mr from './mr.json'
 
 export type Lang = 'en' | 'hi' | 'mr'
 
-const translations = { en, hi, mr }
+type TranslationValue = string | { [key: string]: TranslationValue }
+
+const translations: Record<Lang, TranslationValue> = { en, hi, mr }
 
 export function t(lang: Lang, key: string): string {
   const keys = key.split('.')
-  let value: any = translations[lang]
+  let value: TranslationValue | undefined = translations[lang]
+
   for (const k of keys) {
-    value = value?.[k]
+    if (!value || typeof value === 'string') {
+      return key
+    }
+    value = value[k]
   }
-  return value ?? key
+
+  return typeof value === 'string' ? value : key
 }
 
 export const langLabels: Record<Lang, string> = {
