@@ -35,7 +35,7 @@ Important:
 This repo is configured for Railway Node deploy:
 
 - `next.config.ts` uses `output: "standalone"`
-- `npm run build` creates standalone server output
+- `npm run build` creates standalone server output and copies `.next/static` + `public` into `.next/standalone`
 - `npm start` runs `HOSTNAME=0.0.0.0 node .next/standalone/server.js`
 
 Deploy steps:
